@@ -1,111 +1,148 @@
+import os
+import argparse
 from pathlib import Path
 
-IGNORED_DIRS = {
+#
+#
+# python main.py D:/Projects/market-os --ext .py .env --exclude-dirs .git .venv node_modules .idea .ruff_cache
+#
+#
+
+DEFAULT_EXCLUDE_DIRS = {
     ".git",
-    ".vs",
-    "bin",
-    "obj",
-    "node_modules",
+    ".venv",
     "__pycache__",
-    "venv",
-    ".venv"
+    "node_modules",
+    "dist",
+    "build",
 }
 
 
-def build_tree(path, excluded_dirs, prefix=""):
-    result = []
+# ---------- TREE PRINTER ----------
 
-    items = sorted(
-        [
-            item for item in path.iterdir()
-            if item.name not in excluded_dirs
-        ],
-        key=lambda x: (x.is_file(), x.name.lower())
-    )
+def print_tree(root: Path, prefix="", exclude_dirs=None, output=None):
+    exclude_dirs = exclude_dirs or set()
 
-    for index, item in enumerate(items):
-        is_last = index == len(items) - 1
+    try:
+        entries = sorted(list(root.iterdir()), key=lambda x: (x.is_file(), x.name.lower()))
+    except PermissionError:
+        return
 
-        branch = "└── " if is_last else "├── "
-        result.append(prefix + branch + item.name)
+    for i, entry in enumerate(entries):
+        is_last = (i == len(entries) - 1)
+        connector = "└── " if is_last else "├── "
 
-        if item.is_dir():
+        line = prefix + connector + entry.name
+
+        if output is not None:
+            output.append(line)
+        else:
+            print(line)
+
+        if entry.is_dir():
+
+            # если папка запрещена — показываем, но НЕ заходим внутрь
+            if entry.name in exclude_dirs:
+                continue
+
             extension = "    " if is_last else "│   "
-            result.extend(
-                build_tree(
-                    item,
-                    excluded_dirs,
-                    prefix + extension
-                )
-            )
-
-    return result
+            print_tree(entry, prefix + extension, exclude_dirs, output)
 
 
-def collect_files(path: Path, extensions: set[str]):
-    files = []
+# ---------- FILE FILTERS ----------
 
-    for file in path.rglob("*"):
-        if not file.is_file():
-            continue
+def should_skip_file(file_path, exts):
+    if not exts:
+        return False
+    return file_path.suffix.lower() not in exts
 
-        if any(part in IGNORED_DIRS for part in file.parts):
-            continue
 
-        if file.suffix.lower() in extensions:
-            files.append(file)
+def in_excluded_dir(path_parts, exclude_dirs):
+    return any(part in exclude_dirs for part in path_parts)
 
-    return files
 
+def read_file(file_path, max_size):
+    try:
+        if max_size and file_path.stat().st_size > max_size:
+            return "[SKIPPED: too large]\n"
+        return file_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        return f"[ERROR] {e}\n"
+
+
+# ---------- MAIN ----------
 
 def main():
-    directory = input("Путь к проекту: ").strip()
-    extensions = input(
-        "Расширения для вывода содержимого (.py,.cs,.js): "
-    ).strip()
+    parser = argparse.ArgumentParser(description="Tree + filtered file dump tool")
 
-    ext_set = {
-        ext.strip().lower()
-        for ext in extensions.split(",")
-        if ext.strip()
-    }
+    parser.add_argument("root", help="Project root")
 
-    root = Path(directory)
+    parser.add_argument(
+        "--ext",
+        nargs="*",
+        default=[".py", ".env", ".md", ".txt"],
+        help="Allowed file extensions",
+    )
+
+    parser.add_argument(
+        "--exclude-dirs",
+        nargs="*",
+        default=list(DEFAULT_EXCLUDE_DIRS),
+        help="Directories to exclude",
+    )
+
+    parser.add_argument(
+        "--max-size",
+        type=int,
+        default=0,
+        help="Max file size in bytes",
+    )
+
+    parser.add_argument(
+        "--out",
+        default="",
+        help="Output file",
+    )
+
+    args = parser.parse_args()
+
+    root = Path(args.root)
+    exts = set(e.lower() if e.startswith(".") else f".{e.lower()}" for e in args.ext)
+    exclude_dirs = set(args.exclude_dirs)
 
     output = []
 
-    output.append("=" * 60)
-    output.append("DIRECTORY STRUCTURE")
-    output.append("=" * 60)
-    output.append(root.name)
+    # ---------- TREE ----------
+    output.append(str(root))
+    print_tree(root, exclude_dirs=exclude_dirs, output=output)
 
-    output.extend(build_tree(root))
+    output.append("\n\n================ FILE CONTENTS ================\n")
 
-    output.append("")
-    output.append("=" * 60)
-    output.append("FILE CONTENTS")
-    output.append("=" * 60)
+    # ---------- FILE DUMP ----------
+    for file_path in root.rglob("*"):
 
-    for file in collect_files(root, ext_set):
-        output.append("")
-        output.append(f"FILE: {file.relative_to(root)}")
-        output.append("-" * 60)
+        if file_path.is_dir():
+            continue
 
-        try:
-            content = file.read_text(
-                encoding="utf-8",
-                errors="ignore"
-            )
-            output.append(content)
-        except Exception as ex:
-            output.append(f"[ERROR] {ex}")
+        if should_skip_file(file_path, exts):
+            continue
+
+        if in_excluded_dir(file_path.parts, exclude_dirs):
+            continue
+
+        output.append("\n" + "=" * 60)
+        output.append(f"FILE: {file_path}")
+        output.append("=" * 60 + "\n")
+
+        output.append(read_file(file_path, args.max_size))
 
     result = "\n".join(output)
 
-    output_file = root / "project_snapshot.txt"
-    output_file.write_text(result, encoding="utf-8")
-
-    print(f"\nГотово: {output_file}")
+    if args.out:
+        Path(args.out).write_text(result, encoding="utf-8")
+        print(f"Saved to {args.out}")
+    else:
+        print(result)
 
 
 if __name__ == "__main__":
